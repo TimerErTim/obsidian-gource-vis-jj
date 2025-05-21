@@ -1,0 +1,14 @@
+#!/bin/env bash
+
+# Change to the directory where the script resides
+cd "$(dirname "$0")" || exit 1
+
+# Activate the virtual environment
+source .venv/bin/activate || {
+  echo "Failed to activate virtual environment"
+  exit 1
+}
+
+# Replace the shell with the Python script, forwarding all arguments
+exec python src/ "$@"
+
