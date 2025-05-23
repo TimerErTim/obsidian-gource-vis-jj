@@ -26,7 +26,7 @@ class ChangeDescription:
 
 def get_jj_commits_and_file_path_changes() -> list[ChangeDescription]:
     cmd_submission = ["jj", "log", "-r", "..", "-T", "builtin_log_oneline",
-                      "--summary", "--no-graph"]
+                      "--summary", "--no-graph", "--ignore-working-copy"]
     cmdpipe = subprocess.Popen(
         cmd_submission, stdout=subprocess.PIPE, text=True, bufsize=1)
     # output = subprocess.check_output(cmd_submission).decode()
