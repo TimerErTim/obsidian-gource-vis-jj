@@ -24,8 +24,8 @@ class ChangeDescription:
     file_changes: list[FileChange] = field(default_factory=lambda: [])
 
 
-def get_jj_commits_and_file_path_changes() -> list[ChangeDescription]:
-    cmd_submission = ["jj", "log", "-r", "..@", "-T", "builtin_log_oneline",
+def get_jj_commits_and_file_path_changes(revset: str) -> list[ChangeDescription]:
+    cmd_submission = ["jj", "log", "-r", revset, "-T", "builtin_log_oneline",
                       "--summary", "--no-graph", "--ignore-working-copy"]
     cmdpipe = subprocess.Popen(
         cmd_submission, stdout=subprocess.PIPE, text=True, bufsize=1)
@@ -167,22 +167,31 @@ def print_gource_custom_logs(changes: list[ChangeDescription]):
     for change in changes:
         print_gource_logs_for_change(change)
 
+def list_get(lst, index, default_value=...):
+    try:
+        return lst[index]
+    except IndexError:
+        if default_value == ...:
+            raise
+        return default_value
 
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python script.py <working_directory> [other_args...]", file=sys.stderr)
+            "Usage: python script.py <working_directory> [revset='..@-']", file=sys.stderr)
         sys.exit(1)
 
+    args = list(sys.argv)
+
     # Change working directory to the first argument
-    working_dir = sys.argv[1]
+    working_dir = list_get(sys.argv, 1)
     os.chdir(working_dir)
 
     # Remove the working directory argument so remaining args are untouched
-    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    revset = list_get(sys.argv, 2, "..@-")
 
-    print("Processing vault at:", os.getcwd(), file=sys.stderr)
-    raw_changes = get_jj_commits_and_file_path_changes()
+    print(f"Processing revsets '{revset}' of vault at:", os.getcwd(), file=sys.stderr)
+    raw_changes = get_jj_commits_and_file_path_changes(revset)
     fill_changes_with_tags(
         raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c))
     processed_changes = raw_changes
