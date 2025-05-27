@@ -6,6 +6,17 @@ import os
 import re
 from typing import Callable
 import frontmatter
+from textwrap import dedent
+import argparse
+from enum import Enum
+
+
+class PathGenPolicy(Enum):
+    """Policy for generating file paths in gource visualization."""
+    TAGS_AND_FILENAME = "tags_and_filename"
+    TAGS_ONLY = "tags_only"
+    FILEPATH_ONLY = "filepath_only"
+    MIXTURE = "mixture"
 
 
 @dataclass
@@ -24,9 +35,12 @@ class ChangeDescription:
     file_changes: list[FileChange] = field(default_factory=lambda: [])
 
 
-def get_jj_commits_and_file_path_changes(revset: str) -> list[ChangeDescription]:
+def get_jj_commits_and_file_path_changes(revset: str, ignore_working_copy: bool) -> list[ChangeDescription]:
     cmd_submission = ["jj", "log", "-r", revset, "-T", "builtin_log_oneline",
                       "--summary", "--no-graph"]
+    if ignore_working_copy:
+        cmd_submission.append("--ignore-working-copy")
+
     cmdpipe = subprocess.Popen(
         cmd_submission, stdout=subprocess.PIPE, text=True, bufsize=1)
     # output = subprocess.check_output(cmd_submission).decode()
@@ -111,9 +125,9 @@ def get_tags_at_jj_revision(filepath: str, change_id: str) -> list[str] | None:
 
 def fill_changes_with_tags(
     changes: list[ChangeDescription],
-    processed_clb: Callable[[ChangeDescription], None] = None
+    processed_clb: Callable[[ChangeDescription], None] | None = None
 ):
-    prev_change_id = None
+    prev_change_id: str | None = None
     for change in reversed(changes):
         change_id = change.change_id
         for file_change in change.file_changes:
@@ -167,36 +181,62 @@ def print_gource_custom_logs(changes: list[ChangeDescription]):
     for change in changes:
         print_gource_logs_for_change(change)
 
-def list_get(lst, index, default_value=...):
-    try:
-        return lst[index]
-    except IndexError:
-        if default_value == ...:
-            raise
-        return default_value
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Generate Gource visualization logs from Jujutsu repository with Obsidian vault support.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=dedent("""\
+            Examples:
+                obsidian-gource-vis-jj /path/to/obsidian/vault
+                obsidian-gource-vis-jj /vault -r 'main..@'
+                obsidian-gource-vis-jj /vault --path-gen-policy tags_only
+        """),
+    )
+    
+    parser.add_argument(
+        "path",
+        help="Path to the working directory (Obsidian vault with Jujutsu repository)"
+    )
+    
+    parser.add_argument(
+        "--revset",
+        "-r",
+        default="..@-",
+        help="JJ revset to process (default: %(default)s)"
+    )
+
+    parser.add_argument(
+        "--ignore-working-copy",
+        action="store_true",
+        default=False,
+        help="Ignore working copy when reading JJ log"
+    )
+    
+    parser.add_argument(
+        "--path-gen-policy",
+        type=lambda x: PathGenPolicy(x),
+        choices=[policy.value for policy in PathGenPolicy],
+        default=PathGenPolicy.TAGS_AND_FILENAME.value,
+        help="Policy for generating file paths in visualization (default: %(default)s, choices: %(choices)s)",
+        metavar="PATH_GEN_POLICY"
+    )
+    
+    return parser.parse_args()
 
 def main():
-    if len(sys.argv) < 2:
-        print(
-            "Usage: python script.py <working_directory> [revset='..@-']", file=sys.stderr)
-        sys.exit(1)
+    args = parse_arguments()
+    
+    # Change working directory to the specified path
+    os.chdir(args.path)
+    
+    print(f"Processing revsets '{args.revset}' of vault at:", os.getcwd(), file=sys.stderr)
+    print(f"Using path generation policy: {args.path_gen_policy.value}", file=sys.stderr)
 
-    args = list(sys.argv)
-
-    # Change working directory to the first argument
-    working_dir = list_get(sys.argv, 1)
-    os.chdir(working_dir)
-
-    # Remove the working directory argument so remaining args are untouched
-    revset = list_get(sys.argv, 2, "..@-")
-
-    print(f"Processing revsets '{revset}' of vault at:", os.getcwd(), file=sys.stderr)
-    raw_changes = get_jj_commits_and_file_path_changes(revset)
+    raw_changes = get_jj_commits_and_file_path_changes(args.revset, args.ignore_working_copy)
     print(f"Found {len(raw_changes)} revisions...", file=sys.stderr)
-    fill_changes_with_tags(
-        raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c))
-    processed_changes = raw_changes
-    # print_gource_custom_logs(processed_changes)
+    
+    fill_changes_with_tags(raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c))
 
 
 if __name__ == "__main__":
