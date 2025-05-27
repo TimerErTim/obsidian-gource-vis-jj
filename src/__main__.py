@@ -26,7 +26,7 @@ class ChangeDescription:
 
 def get_jj_commits_and_file_path_changes(revset: str) -> list[ChangeDescription]:
     cmd_submission = ["jj", "log", "-r", revset, "-T", "builtin_log_oneline",
-                      "--summary", "--no-graph", "--ignore-working-copy"]
+                      "--summary", "--no-graph"]
     cmdpipe = subprocess.Popen(
         cmd_submission, stdout=subprocess.PIPE, text=True, bufsize=1)
     # output = subprocess.check_output(cmd_submission).decode()
@@ -192,6 +192,7 @@ def main():
 
     print(f"Processing revsets '{revset}' of vault at:", os.getcwd(), file=sys.stderr)
     raw_changes = get_jj_commits_and_file_path_changes(revset)
+    print(f"Found {len(raw_changes)} revisions...", file=sys.stderr)
     fill_changes_with_tags(
         raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c))
     processed_changes = raw_changes
