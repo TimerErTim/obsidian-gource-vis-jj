@@ -1,4 +1,5 @@
-import obsidiantools as otools
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 import subprocess
 import sys
@@ -11,12 +12,98 @@ import argparse
 from enum import Enum
 
 
-class PathGenPolicy(Enum):
-    """Policy for generating file paths in gource visualization."""
-    TAGS_AND_FILENAME = "tags_and_filename"
-    TAGS_ONLY = "tags_only"
-    FILEPATH_ONLY = "filepath_only"
-    MIXTURE = "mixture"
+class PathStrategy(Enum):
+    """Strategy for generating paths from Obsidian notes in visualization"""
+    TAGS_AND_FILENAME = "both"
+    TAGS_ONLY = "tags"
+    FILEPATH_ONLY = "file"
+    CONFLICT_FREE = "conflict-free"
+
+    def get_change_path_set(self, change: ChangeDescription) -> ChangePathSet:
+        fn_map = {
+            self.TAGS_AND_FILENAME: PathStrategy.tags_and_filename_paths,
+            self.TAGS_ONLY: PathStrategy.tags_only_paths,
+            self.FILEPATH_ONLY: PathStrategy.filepath_only_paths,
+            self.CONFLICT_FREE: PathStrategy.conflict_free_paths,
+        }
+        convert_fn = fn_map[self]
+
+        old_paths = convert_fn([(file_change.old_path, file_change.old_tags) for file_change in change.file_changes])
+        new_paths = convert_fn([(file_change.new_path, file_change.new_tags) for file_change in change.file_changes])
+
+        return ChangePathSet(old_paths, new_paths)
+
+    @staticmethod
+    def tags_and_filename_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
+        paths = set()
+        for path, tags in pairs:
+            if tags is not None and len(tags) > 0:
+                paths.update({
+                    f"{tag}/{path.split('/')[-1]}" for tag in tags
+                })
+            elif path is not None:
+                paths.add(path)
+        return paths
+
+    @staticmethod
+    def tags_only_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
+        paths = set()
+        for path, tags in pairs:
+            if tags is not None and len(tags) > 0:
+                paths.update({
+                    f"{tag}.md" for tag in tags
+                })
+            elif path is not None:
+                paths.add(path)
+        return paths
+
+    @staticmethod
+    def filepath_only_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
+        paths = set()
+        for path, tags in pairs:
+            if path is not None:
+                paths.add(path)
+        return paths
+
+    @staticmethod
+    def conflict_free_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
+        tag_to_with_path_alternative = dict()
+        duplicates = set()
+        paths = set()
+
+        def insert_without_alternative(path: str):
+            if path in paths:
+                # Resolve the previous duplicate (which has to be a tag) with its alternative path
+                paths.add(tag_to_with_path_alternative[path])
+            else:
+                paths.add(path)
+
+        def insert_with_alternative(path: str, path_alternative: str):
+            if path in paths:
+                duplicates.add(path)
+                insert_without_alternative(path_alternative)
+            else:
+                paths.add(path)
+                tag_to_with_path_alternative[path] = path_alternative
+
+        for path, tags in pairs:
+            if tags is not None and len(tags) > 0 and path is not None:
+                for tag in tags:
+                    insert_with_alternative(f"{tag}.md", f"{tag}/{path.split('/')[-1]}")
+            elif path is not None:
+                insert_without_alternative(path)
+
+        for duplicate in duplicates:
+            paths.remove(duplicate)
+            paths.add(tag_to_with_path_alternative[duplicate])
+
+        return paths
+
+
+@dataclass
+class ChangePathSet:
+    old_paths: set[str] = field(default_factory=lambda: set())
+    new_paths: set[str] = field(default_factory=lambda: set())
 
 
 @dataclass
@@ -140,46 +227,33 @@ def fill_changes_with_tags(
             # print(f"Found tags for file '{file_change.new_path}' at rev '{change_id}':", file=sys.stderr)
             # print(file_change.new_tags, file=sys.stderr)
 
-        if processed_clb:
+        if processed_clb is not None:
             processed_clb(change)
 
         prev_change_id = change_id
 
 
-def print_gource_logs_for_change(change: ChangeDescription):
-    for file_change in change.file_changes:
-        old_paths = set()
-        if file_change.old_tags:
-            old_paths = {
-                f"{x}/{file_change.old_path.split('/')[-1]}" for x in file_change.old_tags}
-        elif file_change.old_path:
-            old_paths = {file_change.old_path}
+def print_gource_logs_for_change(change: ChangeDescription, path_strategy: PathStrategy):
+    paths = path_strategy.get_change_path_set(change)
 
-        new_paths = set()
-        if file_change.new_tags:
-            new_paths = {
-                f"{x}/{file_change.new_path.split('/')[-1]}" for x in file_change.new_tags}
-        elif file_change.new_path:
-            new_paths = {file_change.new_path}
+    modified = paths.new_paths.intersection(paths.old_paths)
+    added = paths.new_paths.difference(paths.old_paths)
+    deleted = paths.old_paths.difference(paths.new_paths)
 
-        modified = new_paths.intersection(old_paths)
-        added = new_paths.difference(old_paths)
-        deleted = old_paths.difference(new_paths)
+    def make_line(change_type: str, change_path: str) -> str:
+        return f"{change.timestamp}|{change.author}|{change_type}|{change_path}"
 
-        def make_line(change_type: str, change_path: str) -> str:
-            return f"{change.timestamp}|{change.author}|{change_type}|{change_path}"
-
-        for path in modified:
-            print(make_line('M', path), flush=True)
-        for path in added:
-            print(make_line('A', path), flush=True)
-        for path in deleted:
-            print(make_line('D', path), flush=True)
+    for path in modified:
+        print(make_line('M', path), flush=True)
+    for path in added:
+        print(make_line('A', path), flush=True)
+    for path in deleted:
+        print(make_line('D', path), flush=True)
 
 
-def print_gource_custom_logs(changes: list[ChangeDescription]):
+def print_gource_custom_logs(changes: list[ChangeDescription], path_strategy: PathStrategy):
     for change in changes:
-        print_gource_logs_for_change(change)
+        print_gource_logs_for_change(change, path_strategy)
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -190,7 +264,7 @@ def parse_arguments():
             Examples:
                 obsidian-gource-vis-jj /path/to/obsidian/vault
                 obsidian-gource-vis-jj /vault -r 'main..@'
-                obsidian-gource-vis-jj /vault --path-gen-policy tags_only
+                obsidian-gource-vis-jj /vault -ps tags_only
         """),
     )
     
@@ -214,15 +288,19 @@ def parse_arguments():
     )
     
     parser.add_argument(
-        "--path-gen-policy",
-        type=lambda x: PathGenPolicy(x),
-        choices=[policy.value for policy in PathGenPolicy],
-        default=PathGenPolicy.TAGS_AND_FILENAME.value,
-        help="Policy for generating file paths in visualization (default: %(default)s, choices: %(choices)s)",
-        metavar="PATH_GEN_POLICY"
+        "--path-strategy",
+        "-ps",
+        type=lambda x: PathStrategy(x).value,
+        choices=[strategy.value for strategy in PathStrategy],
+        default=PathStrategy.TAGS_AND_FILENAME.value,
+        help=f"{PathStrategy.__doc__} (default: %(default)s; choices: %(choices)s)",
+        metavar="PATH_STRATEGY"
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.__setattr__("path_strategy", PathStrategy(args.path_strategy))
+
+    return args
 
 def main():
     args = parse_arguments()
@@ -231,12 +309,12 @@ def main():
     os.chdir(args.path)
     
     print(f"Processing revsets '{args.revset}' of vault at:", os.getcwd(), file=sys.stderr)
-    print(f"Using path generation policy: {args.path_gen_policy.value}", file=sys.stderr)
+    print(f"Using path generation strategy: {args.path_strategy.value}", file=sys.stderr)
 
     raw_changes = get_jj_commits_and_file_path_changes(args.revset, args.ignore_working_copy)
     print(f"Found {len(raw_changes)} revisions...", file=sys.stderr)
     
-    fill_changes_with_tags(raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c))
+    fill_changes_with_tags(raw_changes, processed_clb=lambda c: print_gource_logs_for_change(c, args.path_strategy))
 
 
 if __name__ == "__main__":
