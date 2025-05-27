@@ -6,6 +6,7 @@ import sys
 import os
 import re
 from typing import Callable
+from collections import defaultdict
 import frontmatter
 from textwrap import dedent
 import argparse
@@ -192,22 +193,27 @@ def get_jj_commits_and_file_path_changes(revset: str, ignore_working_copy: bool)
     return changes
 
 
+tags_at_revision_cache: dict[str, dict[str, list[str] | None]] = defaultdict(dict)
+
 def get_tags_at_jj_revision(filepath: str, change_id: str) -> list[str] | None:
     if not filepath.endswith(".md"):
         return None
 
+    if change_id in tags_at_revision_cache[filepath]:
+        return tags_at_revision_cache[filepath][change_id]
+
     cmd_submission = ["jj", "file", "show", "-r",
                       change_id, f'"{filepath}"', "--ignore-working-copy"]
     file_content = subprocess.check_output(cmd_submission).decode()
-    # print("Revision", change_id, "File:", filepath)
-    # print(file_content, "\n")
     try:
         fm, content = frontmatter.parse(file_content)
         tags = fm.get("tags", None)
-        return tags
     except Exception as e:
         print("WARN:", filepath, "could not read tags due to ->", e, file=sys.stderr)
         return None
+        
+    tags_at_revision_cache[filepath][change_id] = tags
+    return tags
 
 
 def fill_changes_with_tags(
