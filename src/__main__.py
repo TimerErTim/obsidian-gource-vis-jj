@@ -297,12 +297,12 @@ def print_gource_logs_for_change(change: ChangeDescription, path_strategy: PathS
     def make_line(change_type: str, change_path: str) -> str:
         return f"{change.timestamp}|{change.author}|{change_type}|{change_path}"
 
-    for path in modified:
-        print(make_line('M', path), flush=True)
-    for path in added:
-        print(make_line('A', path), flush=True)
     for path in deleted:
         print(make_line('D', path), flush=True)
+    for path in added:
+        print(make_line('A', path), flush=True)
+    for path in modified:
+        print(make_line('M', path), flush=True)
 
 
 def print_gource_custom_logs(changes: list[ChangeDescription], path_strategy: PathStrategy):
