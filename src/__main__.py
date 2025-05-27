@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 import subprocess
 import sys
 import os
@@ -21,18 +22,24 @@ class PathStrategy(Enum):
     CONFLICT_FREE = "conflict-free"
 
     def get_change_path_set(self, change: ChangeDescription) -> ChangePathSet:
-        fn_map = {
+        simple_conversion_map = {
             self.TAGS_AND_FILENAME: PathStrategy.tags_and_filename_paths,
             self.TAGS_ONLY: PathStrategy.tags_only_paths,
-            self.FILEPATH_ONLY: PathStrategy.filepath_only_paths,
-            self.CONFLICT_FREE: PathStrategy.conflict_free_paths,
+            self.FILEPATH_ONLY: PathStrategy.filepath_only_paths
         }
-        convert_fn = fn_map[self]
+        simple_convert_fn = simple_conversion_map.get(self, None)
 
-        old_paths = convert_fn([(file_change.old_path, file_change.old_tags) for file_change in change.file_changes])
-        new_paths = convert_fn([(file_change.new_path, file_change.new_tags) for file_change in change.file_changes])
+        if simple_convert_fn is not None:
+            old_paths = simple_convert_fn([(file_change.old_path, file_change.old_tags) for file_change in change.file_changes])
+            new_paths = simple_convert_fn([(file_change.new_path, file_change.new_tags) for file_change in change.file_changes])
+            return ChangePathSet(old_paths, new_paths)
 
-        return ChangePathSet(old_paths, new_paths)
+        complex_conversion_map = {
+            self.CONFLICT_FREE: self.conflict_free_paths
+        }
+        complex_convert_fn = complex_conversion_map[self]
+        return complex_convert_fn(change)
+        
 
     @staticmethod
     def tags_and_filename_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
@@ -66,45 +73,85 @@ class PathStrategy(Enum):
                 paths.add(path)
         return paths
 
-    @staticmethod
-    def conflict_free_paths(pairs: list[tuple[str | None, list[str] | None]]) -> set[str]:
-        tag_to_with_path_alternative = dict()
-        duplicates = set()
-        paths = set()
+    def conflict_free_paths(self, change: ChangeDescription) -> ChangePathSet:
+        if not hasattr(self, "current_alternatives_map"):
+            setattr(self, "current_alternatives_map", dict())
+        current_alternatives = getattr(self, "current_alternatives_map")
 
-        def insert_without_alternative(path: str):
-            if path in paths:
-                # Resolve the previous duplicate (which has to be a tag) with its alternative path
-                paths.add(tag_to_with_path_alternative[path])
+        old_paths = set()
+        new_paths = set()
+
+        # perform alternatives calculations
+        def get_path_alternatives(pairs: list[tuple[str | None, list[str] | None]]) -> dict[str, set[str]]:
+            alternatives = dict()
+            for path, tags in pairs:
+                if tags is not None and len(tags) > 0 and path is not None:
+                    for tag in tags:
+                        tag_path = f'{tag}.md'
+                        tag_path_alternative = f'{tag}/{path.split("/")[-1]}'
+                        if tag_path in alternatives:
+                            alternatives[tag_path].add(tag_path_alternative)
+                        else:
+                            alternatives[tag_path] = {tag_path_alternative}
+                elif path is not None:
+                    alternatives[path] = set()
+            return alternatives
+
+        old_alternatives = get_path_alternatives([(file_change.old_path, file_change.old_tags) for file_change in change.file_changes])
+        new_alternatives = get_path_alternatives([(file_change.new_path, file_change.new_tags) for file_change in change.file_changes])
+
+        # perform path selection (use alternatives if name is ambiguous)
+        for path, alternatives in old_alternatives.items():
+            all_alternatives = set(alternatives)
+            if path in current_alternatives:
+                all_alternatives.update(current_alternatives[path])
+
+            if len(all_alternatives) > 1:
+                old_paths.update(all_alternatives)
             else:
-                paths.add(path)
+                old_paths.add(path)
+        
+        for path, alternatives in new_alternatives.items():
+            all_alternatives = set(alternatives)
+            if path in current_alternatives:
+                all_alternatives.update(current_alternatives[path])
 
-        def insert_with_alternative(path: str, path_alternative: str):
-            if path in paths:
-                duplicates.add(path)
-                insert_without_alternative(path_alternative)
+            if len(all_alternatives) > 1:
+                new_paths.update(all_alternatives)
             else:
-                paths.add(path)
-                tag_to_with_path_alternative[path] = path_alternative
+                new_paths.add(path)
 
-        for path, tags in pairs:
-            if tags is not None and len(tags) > 0 and path is not None:
-                for tag in tags:
-                    insert_with_alternative(f"{tag}.md", f"{tag}/{path.split('/')[-1]}")
-            elif path is not None:
-                insert_without_alternative(path)
+        # finish / maintenance
+        # remove or retain alternatives
+        updated_current_alternatives = dict()
+        for path, alternatives in current_alternatives.items():
+            if path in old_alternatives and path not in new_alternatives:
+                # delete path in next update
+                continue
+            elif path in new_alternatives and path not in old_alternatives:
+                # add path completely new in next update
+                updated_current_alternatives[path] = set(new_alternatives[path])
+            elif path in old_alternatives and path in new_alternatives:
+                # modified => alternatives may have changed
+                updated_current_alternatives[path] = set(alternatives)
+                updated_current_alternatives[path].difference_update(old_alternatives[path])
+                updated_current_alternatives[path].update(new_alternatives[path])
+            else:
+                # path and alternatives are unmodified
+                updated_current_alternatives[path] = set(alternatives)
+        # add new paths
+        for path, alternatives in new_alternatives.items():
+            if path not in updated_current_alternatives:
+                updated_current_alternatives[path] = set(alternatives)
+        setattr(self, "current_alternatives_map", updated_current_alternatives)
 
-        for duplicate in duplicates:
-            paths.remove(duplicate)
-            paths.add(tag_to_with_path_alternative[duplicate])
-
-        return paths
+        return ChangePathSet(old_paths, new_paths)
 
 
 @dataclass
 class ChangePathSet:
-    old_paths: set[str] = field(default_factory=lambda: set())
-    new_paths: set[str] = field(default_factory=lambda: set())
+    old_paths: set[str] = field(default_factory=set)
+    new_paths: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -120,7 +167,7 @@ class ChangeDescription:
     change_id: str
     author: str
     timestamp: str
-    file_changes: list[FileChange] = field(default_factory=lambda: [])
+    file_changes: list[FileChange] = field(default_factory=list)
 
 
 def get_jj_commits_and_file_path_changes(revset: str, ignore_working_copy: bool) -> list[ChangeDescription]:
@@ -207,11 +254,12 @@ def get_tags_at_jj_revision(filepath: str, change_id: str) -> list[str] | None:
     file_content = subprocess.check_output(cmd_submission).decode()
     try:
         fm, content = frontmatter.parse(file_content)
-        tags = fm.get("tags", None)
+        tags: list[str] | None = fm.get("tags", None)
+        tags = [tag.rstrip("/") for tag in tags] if tags is not None else None
     except Exception as e:
         print("WARN:", filepath, "could not read tags due to ->", e, file=sys.stderr)
         return None
-        
+
     tags_at_revision_cache[filepath][change_id] = tags
     return tags
 
@@ -221,7 +269,7 @@ def fill_changes_with_tags(
     processed_clb: Callable[[ChangeDescription], None] | None = None
 ):
     prev_change_id: str | None = None
-    for change in reversed(changes):
+    for change in sorted(changes, key=lambda c: datetime.fromisoformat(c.timestamp)):
         change_id = change.change_id
         for file_change in change.file_changes:
             if file_change.old_path and prev_change_id:
